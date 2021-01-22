@@ -3,7 +3,23 @@ import re
 import string
 from pprint import pprint
 
-import nltk as nltk
+
+# Implementation from nltk source
+def ngrams(sequence, n):
+    history = []
+    while n > 1:
+        # PEP 479, prevent RuntimeError from being raised when StopIteration bubbles out of generator
+        try:
+            next_item = next(sequence)
+        except StopIteration:
+            # no more data, terminate the generator
+            return
+        history.append(next_item)
+        n -= 1
+    for item in sequence:
+        history.append(item)
+        yield tuple(history)
+        del history[0]
 
 
 class Janitor:
@@ -22,7 +38,6 @@ class Janitor:
 
         # Constants for use below
         self.delete_chars_set = frozenset(delete_chars)
-        self._splitter_string = "\u25EE\u25C9\u20BB"
 
         # We'll translate uppercase to lowercase and delete naughty characters. This is fast
         # https://stackoverflow.com/questions/638893/what-is-the-most-efficient-way-in-python-to-convert-a-string-to-all-lowercase-st
@@ -32,32 +47,30 @@ class Janitor:
             delete_chars  # These are deleted
         )
 
-
     def normalize_string(self, s):
         return s.translate(self.translation_table)
 
-    def ngrams(self, s):
+    def word_ngrams(self, s):
         """Splits a string into ngram words"""
         tokens = s.split()
         # tokens = nltk.word_tokenize(s) # This is annoying, you have to download nltk stuff
         # If this doesn't evaluate a generator, we should give it one instead
         # TODO: Should remove this so there are no dependencies
-        ngrams = nltk.ngrams(tokens, self.ngram_n)
-        return (" ".join(ngram) for ngram in ngrams)
+        ngram_seq = ngrams(tokens, self.ngram_n)
+        return (" ".join(ngram) for ngram in ngram_seq)
 
     def register_contaminant(self, dirt_string):
         """Register a string as contamination to be removed, e.g. a test set"""
-        self.dirt_ngrams.update(self.ngrams(self.normalize_string(dirt_string)))
-
+        self.dirt_ngrams.update(self.word_ngrams(self.normalize_string(dirt_string)))
 
     def clean(self, dirty_string):
         """Split the source string by contamination and return clean chunks. Returns an empty list if too dirty"""
-        source_ngrams = self.ngrams(self.normalize_string(dirty_string))
+        source_ngrams = self.word_ngrams(self.normalize_string(dirty_string))
 
         # Other approaches: loop over the dirt_ngrams and use regex, reverse the hash set comparison
         match_indices = (i for i, ngram in enumerate(source_ngrams) if ngram in self.dirt_ngrams)
 
-        # FIXME The following is slow. We could drop this to C, but the problem is the approach
+        # FIXME The following is slow. We could drop this to C, but the problem is probably the approach
         #   We could remove punctuation as we create ngrams so the indices match?
         #   We should leverage the fact that we only need to consider cases where <10 ngrams match
 
