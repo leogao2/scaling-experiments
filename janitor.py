@@ -68,7 +68,7 @@ class Janitor:
         source_ngrams = self.word_ngrams(self.normalize_string(dirty_string))
 
         # Other approaches: loop over the dirt_ngrams and use regex, reverse the hash set comparison
-        match_indices = (i for i, ngram in enumerate(source_ngrams) if ngram in self.dirt_ngrams)
+        match_indices = ((i, i+len(ngram)) for i, ngram in enumerate(source_ngrams) if ngram in self.dirt_ngrams)
 
         # FIXME The following is slow. We could drop this to C, but the problem is probably the approach
         #   We could remove punctuation as we create ngrams so the indices match?
@@ -88,7 +88,7 @@ class Janitor:
         for i, c in enumerate(dirty_string):
             # When we have passed the current match, get the next one
             # This must be calculated using the index in the normalized string, not the dirty one
-            if index_in_normalized > match + self.window_to_remove:
+            if index_in_normalized > match[1] + self.window_to_remove:
                 match = next(match_indices, None)
                 matches_considered += 1
 
@@ -104,7 +104,7 @@ class Janitor:
                 building_words.append([])
 
             # While we're before the current match, add characters to our string builder
-            if index_in_normalized < match - self.window_to_remove:
+            if index_in_normalized < match[0] - self.window_to_remove:
                 building_words[-1].append(c)
 
             # Our index in the normalized string is only used when the character
