@@ -111,7 +111,8 @@ class Janitor:
             if start > splice_idx:
                 clean_chunks.append(dirty_string[splice_idx: start])
             splice_idx = end
-        return clean_chunks
+
+        return filter(lambda l: len(l) > 200, clean_chunks)
 
 
 # TODO List edge cases to consider:
