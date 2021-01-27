@@ -1,7 +1,10 @@
-import itertools
 import re
 import string
+import timeit
+import pickle
 from pprint import pprint
+import janitor_util  # This is a cpp module. Compile janitor_util.cpp with:
+# c++ -O3 -Wall -shared -std=c++11 -fPIC $(python3 -m pybind11 --includes) janitor_util.cpp -o janitor_util$(python3-config --extension-suffix) -undefined dynamic_lookup
 
 
 # Implementation from nltk source
@@ -57,7 +60,7 @@ def word_ngrams_indices(s, n):
     # )
     ngram_indices_pairs = (zip(*ngram_with_indices) for ngram_with_indices in ngram_seqs_with_indices)
 
-    # Generator of ( (word_ngram, (start, end)), (word_ngram, (start, end)), ...)
+    # Generator of ( (word_ngram, (start, end)), (word_ngram, start, end)), ...)
     return ((" ".join(ngram_seq), (indices[0][0], indices[-1][1])) for ngram_seq, indices in ngram_indices_pairs)
 
 
@@ -68,10 +71,14 @@ class Janitor:
                  ngram_n=13,
                  window_to_remove=200,
                  too_dirty_cutoff=10,
-                 delete_chars=string.punctuation):
+                 minimum_slice_length=200,
+                 delete_chars=string.punctuation
+     ):
         self.ngram_n = ngram_n
         self.window_to_remove=window_to_remove
         self.too_dirty_cutoff = too_dirty_cutoff
+        self.minimum_slice_length = minimum_slice_length
+        self.delete_chars = delete_chars
 
         self.dirt_ngrams = set()
 
@@ -80,57 +87,159 @@ class Janitor:
         self.translation_table = str.maketrans(
             string.ascii_lowercase + string.ascii_uppercase,  # These characters
             string.ascii_lowercase * 2,  # Become these characters
-            delete_chars  # These are deleted
+            self.delete_chars  # These are deleted
         )
 
-        # Constants for use below
-        self.ngram_missing_chars = frozenset(delete_chars + string.whitespace)
 
-    def normalize_string(self, s):
-        return s.translate(self.translation_table)
+    def save_contamination_ngrams(self, filename):
+        with open(filename, 'wb') as fp:
+            pickle.dump(filename, fp)
 
-    def register_contaminant(self, dirt_string):
-        """Register a string as contamination to be removed, e.g. a test set"""
-        self.dirt_ngrams.update(word_ngrams(self.normalize_string(dirt_string), self.ngram_n))
 
-    def clean(self, dirty_string):
-        contamination_indices = (
-            idx_pair
-            for dirty_ngram, idx_pair in word_ngrams_indices(dirty_string, self.ngram_n)
-            if self.normalize_string(dirty_ngram) in self.dirt_ngrams
-        )
+    def load_contamination_ngrams(self, filename):
+        with open(filename, 'rb') as fp:
+            self.dirt_ngrams = pickle.load(fp)
 
+
+    def split_chunks(self, dirty_string, dirty_parts):
         clean_chunks = []
         splice_idx = 0
-        for i, (start, end) in enumerate(contamination_indices):
+        for i, (ngram, start, end) in enumerate(dirty_parts):
             if i > self.too_dirty_cutoff:
                 return []
             start = max(0, start - self.window_to_remove)
             end = min(len(dirty_string), end + self.window_to_remove)
 
-            if start > splice_idx:
+            if start - splice_idx > self.minimum_slice_length:
                 clean_chunks.append(dirty_string[splice_idx: start])
             splice_idx = end
 
-        return filter(lambda l: len(l) > 200, clean_chunks)
+        return clean_chunks
+
+    ##############
+    # Fast C++
+    #############
+
+    def register_contaminant(self, dirt_string):
+        """Register a string as contamination to be removed, e.g. a test set"""
+        self.dirt_ngrams.update(janitor_util.clean_ngram(dirt_string, self.delete_chars, self.ngram_n))
+
+    def clean(self, dirty_string):
+        contamination_indices = janitor_util.clean_ngram_with_indices(dirty_string, self.delete_chars, self.ngram_n)
+        return self.split_chunks(dirty_string, contamination_indices)
 
 
-# TODO List edge cases to consider:
-#   multiple whitespaces in a row
-#   very long document
-#   'contamination' that appears very frequently
-#   very long strings/sequences so ngrams are absurdly long
+    ##############
+    # Slow python
+    #############
+
+    def normalize_string(self, s):
+        return s.translate(self.translation_table)
+
+    def register_contaminant_python(self, dirt_string):
+        """Register a string as contamination to be removed, e.g. a test set"""
+        self.dirt_ngrams.update(word_ngrams(self.normalize_string(dirt_string), self.ngram_n))
+
+    def clean_python(self, dirty_string):
+        """Clean """
+        contamination_indices = (
+            (None, *idx_pair)
+            for dirty_ngram, idx_pair in word_ngrams_indices(dirty_string, self.ngram_n)
+            if self.normalize_string(dirty_ngram) in self.dirt_ngrams
+        )
+        return self.split_chunks(dirty_string, contamination_indices)
+
+
+
+##############
+# Tests
+#############
+
+def print_cpp():
+    source = """   ,, I'm a very !dirty,, ,,  dirty boy. Clean me daddy. \n\nhe he he hehe heh.  lastword  """*2
+
+    for i in range(1, 10, 2):
+        pprint(janitor_util.clean_ngram(source, string.punctuation, i))
+        for ngram, start, end in \
+                janitor_util.clean_ngram_with_indices(source, string.punctuation, i):
+            print(ngram, "\t", start, end, source[start:end].replace("\n", "\\n"))
+
+
+def test_cpp():
+    source = """   ,, I'm a very !dirty,, ,,  dirty boy. Clean me daddy. \n\nhe he he hehe heh.  lastword  """ * 2
+    contaminant = "dirty boy. Clean he he"
+
+    jan_python = Janitor()
+    jan_cpp = Janitor()
+
+    jan_python.register_contaminant_python(contaminant)
+    jan_cpp.register_contaminant(contaminant)
+
+    assert jan_python.dirt_ngrams == jan_cpp.dirt_ngrams, (jan_python.dirt_ngrams, jan_cpp.dirt_ngrams)
+
+    assert jan_python.clean_python(source) == jan_cpp.clean(source), \
+        (jan_python.clean_python(source), jan_cpp.clean(source))
+
+    print("Passed test, python==cpp")
+
+
+def benchmark():
+    # Download and put in data folder: enwik8 (100 MB) from https://cs.fit.edu/~mmahoney/compression/textdata.html
+    setup = \
+"""
+with open("data/enwik8", "r") as f:
+    data = f.read()
+jan = Janitor(too_dirty_cutoff=1000)
+
+jan.register_contaminant('''
+theories is that there is a connection between &quot;geekdom&quot; and autism.  This is hinted, for instance, by a ''Wired Magazine'' article in 2001 entitled &quot;The [[Geek]] Syndrome&quot;, which is a point argued by many in the autism rights movement{{ref|Wired}}.  This article, many professionals assert, is just one example of the media's application of mental disease labels to what is actually variant normal behavior&amp;mdash;they argue that shyness, lack of athletic ability or social skills, and intellectual interests, even when they seem unusual to others, are not in themselves signs of autism or Asperger's syndrome. Others assert that it is actually the medical profession which is applying mental disease labels to children who in the past would have simply been accepted as a little different or even labeled 'gifted'. See [[clinomorphism]] for further discussion of this issue.
+
+Due to the recent publicity surrounding autism and autis
+
+ultan Al Nahyan]] granted [[Petroleum]] concessions, and oil was first found in 1958.  At first, oil money had a marginal impact.  A few lowrise concete buildings were erected, and the first paved road was completed in 1961, but Sheikh Shakbut, uncertain whether the new oil royalties would last, took a cautious approach, prefering to save the revenue rather than investing it in development.  His brother, [[Zayed bin Sultan Al Nahayan]], saw that oil wealth had the potential to transform Abu Dhabi.  The ruling Al Nahayan family decided that Sheikh Zayed should replace his brother as Ruler and carry out his vision of developing the country.  On [[August 6]], [[1966]], with the assistance of the British, Sheikh Zayed became the new ruler.  See generally, Al-Fahim, M, ''From Rags to Riches: A Story of Abu Dhabi'', Chapter Six (London Centre of Arab Studies, 1995), ISBN 1 900404 00 1.
+
+With the announcement by Britain in 1968 that it would withdraw from the Gulf area by 1971, Sheikh Zayed became the main driving force behind the formation of the [[United Arab Emirates]].
+
+After the Emirates gained independence in 1971, 
+''')
+"""
+
+    n = 1
+    print(f"Timing {n} run on 100 MB")
+    print("Register contaminant")
+    # print("\tPython", timeit.timeit("jan.register_contaminant_python(data)", setup=setup, globals=globals(), number=n))
+    print("\tCpp", timeit.timeit("jan.register_contaminant(data)", setup=setup, globals=globals(), number=n))
+
+    print("Clean")
+    # print("\tPython", timeit.timeit("jan.clean_python(data)", setup=setup, globals=globals(), number=n))
+    print("\tCpp", timeit.timeit("jan.clean(data)", setup=setup, globals=globals(), number=n))
+
+
+
 def test():
-    jan = Janitor(window_to_remove=10)
+    source = """   ,, I'm a very !dirty,, ,,  dirty boy. Clean me daddy. \n\nhe he he hehe heh.  lastword  """ * 2
+    contaminant = "dirty boy. Clean he he"
 
-    s = """I'm a very !dirty,, dirty boy. Clean me daddy. he he he hehe heh."""
-    jan.register_contaminant(s)
-    print(jan.normalize_string(s))
-    pprint(jan.dirt_ngrams)
-    pprint(list(word_ngrams_indices(s, 5)))
-    print(jan.clean("""
-    I'm a very !dirty,, dirty boy.            \n\n\n\n    Clean me daddy. he he he hehe heh. dsfsdfgdsfgesrtejhgfd
-    """*5))
+    jan = Janitor(ngram_n=3)
+    jan.register_contaminant(contaminant)
+    cleaned = " ".join(jan.clean(source))
+    for contam in jan.dirt_ngrams:
+        assert contam not in cleaned, contam
+
+    filename = "data/saved_contam"
+    jan.save_contamination_ngrams(filename)
+
+    jan = Janitor(ngram_n=3)
+    jan.load_contamination_ngrams(filename)
+    cleaned = " ".join(jan.clean(source))
+    for contam in jan.dirt_ngrams:
+        assert contam not in cleaned, contam
+
 
 if __name__ == "__main__":
     test()
+    # print_cpp()
+    # test_cpp()
+    # benchmark()
+
+
