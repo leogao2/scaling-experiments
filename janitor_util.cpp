@@ -7,8 +7,8 @@
 #include <queue>
 
 bool is_whitespace(char ch) noexcept {
-    //return ch == 32 or (9 <= ch and ch <= 13);  // " \t\n\r\x0b\x0c" (python string.whitespace)
-    return ch <= 32; // less precise but faster
+    return ch == 32 or (9 <= ch and ch <= 13);  // " \t\n\r\x0b\x0c" (python string.whitespace)
+    //return ch <= 32; // less precise but faster
 }
 
 bool is_punctuation(char c) noexcept {
